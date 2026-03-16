@@ -1,7 +1,9 @@
-# EasySFTPServer
+# SFTPtools (EasySFTPServer)
 
-一個基於 `asyncssh` 和 `tkinter` 的簡易並發 SFTP 服務器。
-它解決了 Windows 內置 OpenSSH 配置繁瑣、權限難調的痛點，能夠快速搭建一個高性能的、支持自定義用戶名和密碼的並發 SFTP 服務器。
+本軟件專門為 **Waterfall SFTP** 文件傳輸而開發。
+具備**高並發**處理能力，並支持**同一賬號重複登錄**。
+
+一個基於 `asyncssh` 和 `tkinter` 的簡易並發 SFTP 服務器。它解決了 Windows 內置 OpenSSH 配置繁瑣、權限難調的痛點，能夠快速搭建一個高性能的、支持自定義用戶名和密碼的並發 SFTP 服務器。
 
 ## 依賴安裝
 請確保你的環境是 Python 3.8+，然後執行：
