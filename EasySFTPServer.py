@@ -1,4 +1,5 @@
 import os
+import posixpath
 import threading
 import asyncio
 import asyncssh
@@ -41,6 +42,49 @@ class LoggingSFTPServer(asyncssh.SFTPServer):
             return path.decode('utf-8', errors='replace')
         return str(path)
 
+    def _normalize_path(self, path):
+        """Normalize client paths to something closer to OpenSSH behaviour."""
+        decoded_path = self._get_decoded_path(path).strip()
+
+        if not decoded_path or decoded_path == ".":
+            normalized = "/"
+        else:
+            decoded_path = decoded_path.replace("\\", "/")
+
+            # Some Windows-based SFTP clients send drive-letter paths.
+            if len(decoded_path) >= 2 and decoded_path[1] == ":":
+                decoded_path = decoded_path[2:]
+
+            if not decoded_path.startswith("/"):
+                decoded_path = "/" + decoded_path
+
+            normalized = posixpath.normpath(decoded_path)
+            if normalized in ("", "."):
+                normalized = "/"
+
+        return normalized.encode("utf-8") if isinstance(path, bytes) else normalized
+
+    def _display_path(self, path):
+        return self._get_decoded_path(path)
+
+    async def _call_super(self, method_name, *args):
+        method = getattr(super(), method_name)
+        res = method(*args)
+        if inspect.isawaitable(res):
+            res = await res
+        return res
+
+    async def _run_with_logging(self, op_name, path, *args):
+        normalized_path = self._normalize_path(path)
+        display_path = self._display_path(normalized_path)
+        log_event(self.ip, f"Request {op_name}: {display_path}")
+
+        try:
+            return await self._call_super(op_name, normalized_path, *args)
+        except Exception as e:
+            log_event(self.ip, f"{op_name} failed: {display_path} - Error: {e}")
+            raise
+
     async def open(self, path, pflags, attrs):
         if (pflags & asyncssh.FXF_WRITE) and (pflags & asyncssh.FXF_READ):
             action = "Read/Write"
@@ -50,17 +94,64 @@ class LoggingSFTPServer(asyncssh.SFTPServer):
             action = "Download"
         else:
             action = "Access"
-            
-        decoded_path = self._get_decoded_path(path)
+
+        normalized_path = self._normalize_path(path)
+        decoded_path = self._display_path(normalized_path)
         log_event(self.ip, f"Request {action}: {decoded_path}")
-        
+
         try:
-            res = super().open(path, pflags, attrs)
-            if inspect.isawaitable(res):
-                res = await res
-            return res
+            return await self._call_super("open", normalized_path, pflags, attrs)
         except Exception as e:
             log_event(self.ip, f"{action} failed: {decoded_path} - Error: {e}")
+            raise
+
+    async def list_folder(self, path):
+        return await self._run_with_logging("list_folder", path)
+
+    async def stat(self, path):
+        return await self._run_with_logging("stat", path)
+
+    async def lstat(self, path):
+        return await self._run_with_logging("lstat", path)
+
+    async def remove(self, path):
+        return await self._run_with_logging("remove", path)
+
+    async def mkdir(self, path, attrs):
+        return await self._run_with_logging("mkdir", path, attrs)
+
+    async def rmdir(self, path):
+        return await self._run_with_logging("rmdir", path)
+
+    async def chattr(self, path, attrs):
+        return await self._run_with_logging("chattr", path, attrs)
+
+    async def realpath(self, path):
+        normalized_path = self._normalize_path(path)
+        display_path = self._display_path(normalized_path)
+        log_event(self.ip, f"Request realpath: {display_path}")
+
+        try:
+            result = await self._call_super("realpath", normalized_path)
+            if isinstance(result, (str, bytes)):
+                result = self._normalize_path(result)
+            log_event(self.ip, f"Resolved realpath: {display_path} -> {self._display_path(result)}")
+            return result
+        except Exception as e:
+            log_event(self.ip, f"realpath failed: {display_path} - Error: {e}")
+            raise
+
+    async def rename(self, oldpath, newpath):
+        normalized_old = self._normalize_path(oldpath)
+        normalized_new = self._normalize_path(newpath)
+        display_old = self._display_path(normalized_old)
+        display_new = self._display_path(normalized_new)
+        log_event(self.ip, f"Request rename: {display_old} -> {display_new}")
+
+        try:
+            return await self._call_super("rename", normalized_old, normalized_new)
+        except Exception as e:
+            log_event(self.ip, f"rename failed: {display_old} -> {display_new} - Error: {e}")
             raise
 
 class SFTPServerAuth(asyncssh.SSHServer):
