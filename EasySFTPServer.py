@@ -39,30 +39,52 @@ class LoggingSFTPServer(asyncssh.SFTPServer):
 
     def _get_decoded_path(self, path):
         if isinstance(path, bytes):
-            return path.decode('utf-8', errors='replace')
+            return path.decode("utf-8", errors="replace")
         return str(path)
 
+    def _normalize_path_str(self, path):
+        if path in ("", "."):
+            return "/"
+
+        path = path.replace("\\", "/")
+
+        # Some Windows-based SFTP clients send drive-letter paths.
+        if len(path) >= 2 and path[1] == ":":
+            path = path[2:]
+
+        if not path.startswith("/"):
+            path = "/" + path
+
+        normalized = posixpath.normpath(path)
+        if normalized in ("", "."):
+            return "/"
+
+        return normalized
+
+    def _normalize_path_bytes(self, path):
+        if path in (b"", b"."):
+            return b"/"
+
+        path = path.replace(b"\\", b"/")
+
+        # Some Windows-based SFTP clients send drive-letter paths.
+        if len(path) >= 2 and path[1:2] == b":":
+            path = path[2:]
+
+        if not path.startswith(b"/"):
+            path = b"/" + path
+
+        normalized = posixpath.normpath(path)
+        if normalized in (b"", b"."):
+            return b"/"
+
+        return normalized
+
     def _normalize_path(self, path):
-        """Normalize client paths to something closer to OpenSSH behaviour."""
-        decoded_path = self._get_decoded_path(path).strip()
-
-        if not decoded_path or decoded_path == ".":
-            normalized = "/"
-        else:
-            decoded_path = decoded_path.replace("\\", "/")
-
-            # Some Windows-based SFTP clients send drive-letter paths.
-            if len(decoded_path) >= 2 and decoded_path[1] == ":":
-                decoded_path = decoded_path[2:]
-
-            if not decoded_path.startswith("/"):
-                decoded_path = "/" + decoded_path
-
-            normalized = posixpath.normpath(decoded_path)
-            if normalized in ("", "."):
-                normalized = "/"
-
-        return normalized.encode("utf-8") if isinstance(path, bytes) else normalized
+        """Normalize client paths while preserving input type."""
+        if isinstance(path, bytes):
+            return self._normalize_path_bytes(path)
+        return self._normalize_path_str(str(path))
 
     def _display_path(self, path):
         return self._get_decoded_path(path)
@@ -108,6 +130,22 @@ class LoggingSFTPServer(asyncssh.SFTPServer):
     async def list_folder(self, path):
         return await self._run_with_logging("list_folder", path)
 
+    def scandir(self, path):
+        normalized_path = self._normalize_path(path)
+        display_path = self._display_path(normalized_path)
+        log_event(self.ip, f"Request scandir: {display_path}")
+
+        try:
+            method = getattr(super(), "scandir", None)
+            if method is not None:
+                return method(normalized_path)
+
+            # Compatibility fallback for implementations that only expose list_folder.
+            return super().list_folder(normalized_path)
+        except Exception as e:
+            log_event(self.ip, f"scandir failed: {display_path} - Error: {e}")
+            raise
+
     async def stat(self, path):
         return await self._run_with_logging("stat", path)
 
@@ -152,6 +190,19 @@ class LoggingSFTPServer(asyncssh.SFTPServer):
             return await self._call_super("rename", normalized_old, normalized_new)
         except Exception as e:
             log_event(self.ip, f"rename failed: {display_old} -> {display_new} - Error: {e}")
+            raise
+
+    async def posix_rename(self, oldpath, newpath):
+        normalized_old = self._normalize_path(oldpath)
+        normalized_new = self._normalize_path(newpath)
+        display_old = self._display_path(normalized_old)
+        display_new = self._display_path(normalized_new)
+        log_event(self.ip, f"Request posix_rename: {display_old} -> {display_new}")
+
+        try:
+            return await self._call_super("posix_rename", normalized_old, normalized_new)
+        except Exception as e:
+            log_event(self.ip, f"posix_rename failed: {display_old} -> {display_new} - Error: {e}")
             raise
 
 class SFTPServerAuth(asyncssh.SSHServer):
